@@ -1,0 +1,59 @@
+# Python
+
+**pycache**/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environment
+
+venv/
+env/
+.venv/
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# Data
+
+data/raw/*
+data/processed/*
+
+# Keep folders
+
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# ML Models
+
+models/
+*.pkl
+*.joblib
+
+# MLflow
+
+mlruns/
+
+# Environment Variables
+
+.env
+
+# IDE
+
+.vscode/
+.idea/
+
+# OS Files
+
+.DS_Store
+Thumbs.db
+
+# Testing
+
+.pytest_cache/
+
+# Coverage
+
+.coverage
+htmlcov/
