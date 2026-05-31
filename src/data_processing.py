@@ -2,9 +2,7 @@ import pandas as pd
 import numpy as np
 
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 
@@ -17,6 +15,7 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
+
         df = X.copy()
 
         # Convert datetime
@@ -30,10 +29,10 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
         df["month"] = df["TransactionStartTime"].dt.month
         df["year"] = df["TransactionStartTime"].dt.year
 
-        # Snapshot date for Recency calculation
+        # Snapshot date
         snapshot_date = df["TransactionStartTime"].max()
 
-        # Customer-level aggregation
+        # Aggregate customer features
         customer_df = (
             df.groupby("CustomerId")
             .agg(
@@ -52,18 +51,17 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
             .reset_index()
         )
 
-        # Recency Feature
+        # Recency feature
         customer_df["recency_days"] = (
-            snapshot_date - customer_df["last_transaction"]
+            snapshot_date
+            - customer_df["last_transaction"]
         ).dt.days
 
-        # Remove helper column
         customer_df.drop(
             columns=["last_transaction"],
             inplace=True
         )
 
-        # Handle customers with only one transaction
         customer_df["std_amount"] = (
             customer_df["std_amount"]
             .fillna(0)
@@ -72,105 +70,182 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
         return customer_df
 
 
-# Numerical Features
-numerical_features = [
-    "transaction_count",
-    "total_amount",
-    "avg_amount",
-    "std_amount",
-    "max_amount",
-    "min_amount",
-    "avg_hour",
-    "avg_day",
-    "avg_month",
-    "fraud_count",
-    "recency_days",
-]
-
-
-# Numerical Pipeline
-numeric_pipeline = Pipeline(
-    steps=[
-        (
-            "imputer",
-            SimpleImputer(strategy="median")
-        ),
-        (
-            "scaler",
-            StandardScaler()
-        )
-    ]
-)
-
-
-# Column Transformer
-preprocessor = ColumnTransformer(
-    transformers=[
-        (
-            "num",
-            numeric_pipeline,
-            numerical_features
-        )
-    ],
-    remainder="drop"
-)
-
-
-# Full Pipeline
-full_pipeline = Pipeline(
-    steps=[
-        (
-            "customer_aggregation",
-            CustomerAggregator()
-        ),
-        (
-            "preprocessing",
-            preprocessor
-        )
-    ]
-)
-
-
 def load_data(filepath):
     """
-    Load raw transaction data.
+    Load raw data.
     """
     return pd.read_csv(filepath)
 
 
-def save_processed_data(data, filepath):
+def create_rfm_table(df):
     """
-    Save processed dataset.
+    Create RFM metrics.
     """
-    pd.DataFrame(data).to_csv(
-        filepath,
-        index=False
+
+    data = df.copy()
+
+    data["TransactionStartTime"] = pd.to_datetime(
+        data["TransactionStartTime"]
     )
+
+    snapshot_date = (
+        data["TransactionStartTime"].max()
+        + pd.Timedelta(days=1)
+    )
+
+    rfm = (
+        data.groupby("CustomerId")
+        .agg(
+            Recency=(
+                "TransactionStartTime",
+                lambda x: (
+                    snapshot_date - x.max()
+                ).days
+            ),
+            Frequency=(
+                "TransactionId",
+                "count"
+            ),
+            Monetary=(
+                "Amount",
+                "sum"
+            )
+        )
+        .reset_index()
+    )
+
+    return rfm
+
+
+def cluster_customers(rfm):
+    """
+    Cluster customers using KMeans.
+    """
+
+    scaler = StandardScaler()
+
+    rfm_scaled = scaler.fit_transform(
+        rfm[
+            [
+                "Recency",
+                "Frequency",
+                "Monetary"
+            ]
+        ]
+    )
+
+    kmeans = KMeans(
+        n_clusters=3,
+        random_state=42,
+        n_init=10
+    )
+
+    rfm["cluster"] = (
+        kmeans.fit_predict(rfm_scaled)
+    )
+
+    return rfm
+
+
+def create_proxy_target(rfm):
+    """
+    Create high-risk proxy label.
+    """
+
+    cluster_summary = (
+        rfm.groupby("cluster")
+        [
+            [
+                "Recency",
+                "Frequency",
+                "Monetary"
+            ]
+        ]
+        .mean()
+    )
+
+    print("\nCluster Summary")
+    print(cluster_summary)
+
+    high_risk_cluster = (
+        cluster_summary["Frequency"]
+        .idxmin()
+    )
+
+    print(
+        f"\nHigh Risk Cluster: {high_risk_cluster}"
+    )
+
+    rfm["is_high_risk"] = np.where(
+        rfm["cluster"] == high_risk_cluster,
+        1,
+        0
+    )
+
+    return rfm
 
 
 if __name__ == "__main__":
 
+    # Load raw data
     df = load_data(
         "data/raw/data.csv"
     )
 
-    processed_data = (
-        full_pipeline.fit_transform(df)
+    # Customer-level features
+    aggregated_df = (
+        CustomerAggregator()
+        .fit_transform(df)
     )
 
     print(
-        f"Processed dataset shape: {processed_data.shape}"
+        f"Aggregated Shape: {aggregated_df.shape}"
     )
-    processed_df = pd.DataFrame(
-    processed_data,
-    columns=numerical_features
-)
-# Save processed dataset
-processed_df.to_csv(
-    "data/processed/processed_data.csv",
-    index=False
-)
 
-print(
-    "Processed data saved to data/processed/processed_data.csv"
-)
+    # Create RFM table
+    rfm = create_rfm_table(df)
+
+    # Cluster customers
+    rfm = cluster_customers(rfm)
+
+    # Create proxy target
+    rfm = create_proxy_target(rfm)
+
+    # Merge target
+    final_df = aggregated_df.merge(
+        rfm[
+            [
+                "CustomerId",
+                "is_high_risk"
+            ]
+        ],
+        on="CustomerId",
+        how="left"
+    )
+
+    print(
+        f"\nFinal Dataset Shape: {final_df.shape}"
+    )
+
+    print(
+        "\nTarget Distribution"
+    )
+
+    print(
+        final_df["is_high_risk"]
+        .value_counts()
+    )
+
+    # Save final dataset
+    final_df.to_csv(
+        "data/processed/processed_data.csv",
+        index=False
+    )
+
+    print(
+        "\nProcessed dataset saved to:"
+    )
+
+    print(
+        "data/processed/processed_data.csv"
+    )
