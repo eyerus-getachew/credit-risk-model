@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 
+from pathlib import Path
+
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -18,21 +20,42 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
 
         df = X.copy()
 
+        # Validate required columns
+        required_columns = [
+            "CustomerId",
+            "TransactionId",
+            "Amount",
+            "TransactionStartTime",
+            "FraudResult"
+        ]
+
+        missing_columns = [
+            col
+            for col in required_columns
+            if col not in df.columns
+        ]
+
+        if missing_columns:
+            raise ValueError(
+                f"Missing required columns: {missing_columns}"
+            )
+
         # Convert datetime
         df["TransactionStartTime"] = pd.to_datetime(
             df["TransactionStartTime"]
         )
 
-        # Time features
+        # Extract time features
         df["hour"] = df["TransactionStartTime"].dt.hour
         df["day"] = df["TransactionStartTime"].dt.day
         df["month"] = df["TransactionStartTime"].dt.month
         df["year"] = df["TransactionStartTime"].dt.year
 
-        # Snapshot date
-        snapshot_date = df["TransactionStartTime"].max()
+        snapshot_date = (
+            df["TransactionStartTime"].max()
+        )
 
-        # Aggregate customer features
+        # Customer-level aggregation
         customer_df = (
             df.groupby("CustomerId")
             .agg(
@@ -51,7 +74,7 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
             .reset_index()
         )
 
-        # Recency feature
+        # Recency Feature
         customer_df["recency_days"] = (
             snapshot_date
             - customer_df["last_transaction"]
@@ -62,6 +85,7 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
             inplace=True
         )
 
+        # Customers with one transaction have NaN std
         customer_df["std_amount"] = (
             customer_df["std_amount"]
             .fillna(0)
@@ -72,14 +96,22 @@ class CustomerAggregator(BaseEstimator, TransformerMixin):
 
 def load_data(filepath):
     """
-    Load raw data.
+    Load raw transaction data safely.
     """
+
+    filepath = Path(filepath)
+
+    if not filepath.exists():
+        raise FileNotFoundError(
+            f"File not found: {filepath}"
+        )
+
     return pd.read_csv(filepath)
 
 
 def create_rfm_table(df):
     """
-    Create RFM metrics.
+    Create Recency, Frequency, Monetary metrics.
     """
 
     data = df.copy()
@@ -149,27 +181,27 @@ def cluster_customers(rfm):
 
 def create_proxy_target(rfm):
     """
-    Create high-risk proxy label.
+    Create proxy high-risk target.
     """
 
     cluster_summary = (
         rfm.groupby("cluster")
-        [
-            [
-                "Recency",
-                "Frequency",
-                "Monetary"
-            ]
-        ]
+        [["Recency", "Frequency", "Monetary"]]
         .mean()
     )
 
     print("\nCluster Summary")
     print(cluster_summary)
 
+    # Least engaged customers:
+    # lowest frequency and lowest monetary value
     high_risk_cluster = (
-        cluster_summary["Frequency"]
-        .idxmin()
+        cluster_summary
+        .sort_values(
+            by=["Frequency", "Monetary"],
+            ascending=True
+        )
+        .index[0]
     )
 
     print(
@@ -187,9 +219,14 @@ def create_proxy_target(rfm):
 
 if __name__ == "__main__":
 
-    # Load raw data
+    print("\nLoading raw data...")
+
     df = load_data(
         "data/raw/data.csv"
+    )
+
+    print(
+        f"Raw Dataset Shape: {df.shape}"
     )
 
     # Customer-level features
@@ -199,19 +236,19 @@ if __name__ == "__main__":
     )
 
     print(
-        f"Aggregated Shape: {aggregated_df.shape}"
+        f"\nAggregated Shape: {aggregated_df.shape}"
     )
 
-    # Create RFM table
+    # RFM Table
     rfm = create_rfm_table(df)
 
-    # Cluster customers
+    # Clustering
     rfm = cluster_customers(rfm)
 
-    # Create proxy target
+    # Target Engineering
     rfm = create_proxy_target(rfm)
 
-    # Merge target
+    # Merge target back
     final_df = aggregated_df.merge(
         rfm[
             [
@@ -236,16 +273,34 @@ if __name__ == "__main__":
         .value_counts()
     )
 
-    # Save final dataset
+    # Data quality validation
+    print(
+        "\nMissing Values Check"
+    )
+
+    print(
+        final_df.isnull().sum()
+    )
+
+    if final_df.isnull().sum().sum() > 0:
+        raise ValueError(
+            "Dataset still contains missing values."
+        )
+
+    # Save processed dataset
+    output_path = (
+        "data/processed/processed_data.csv"
+    )
+
     final_df.to_csv(
-        "data/processed/processed_data.csv",
+        output_path,
         index=False
     )
 
     print(
-        "\nProcessed dataset saved to:"
+        "\nProcessed dataset saved successfully."
     )
 
     print(
-        "data/processed/processed_data.csv"
+        f"Location: {output_path}"
     )
